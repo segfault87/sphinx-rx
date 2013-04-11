@@ -13,12 +13,13 @@
 
 
 from docutils import nodes
-from docutils.parsers.rst import Directive
+from docutils.parsers.rst import Directive, directives
 
 from sphinx import addnodes
 from sphinx.domains import Domain
 from sphinx.directives import ObjectDescription
 from sphinx.domains import Domain, ObjType, Index
+from sphinx.locale import l_, _
 from sphinx.roles import XRefRole
 from sphinx.util.docfields import DocFieldTransformer, Field, GroupedField
 
@@ -36,23 +37,10 @@ def _is_single_paragraph(node):
     return False
 
 
-class RxFieldTransformer(object):
-    def __init__(self, directive):
-        self.domain = directive.domain
-        if '_doc_field_type_map' not in directive.__class__.__dict__:
-            directive.__class__._doc_field_type_map = \
-                self.preprocess_fieldtypes(directive.__class__.doc_field_types)
-        self.typemap = directive._doc_field_type_map
+class RxTransformer(object):
 
-    def preprocess_fieldtypes(self, types):
-        typemap = {}
-        for fieldtype in types:
-            for name in fieldtype.names:
-                typemap[name] = fieldtype, False
-            if fieldtype.is_typed:
-                for name in fieldtype.typenames:
-                    typemap[name] = fieldtype, True
-        return typemap
+    def __init__(self, directive):
+        self.domain = directive.domain        
 
     def transform_all(self, node):
         for child in node:
@@ -60,6 +48,30 @@ class RxFieldTransformer(object):
                 self.transform(child)
 
     def transform(self, node):
+        raise NotImplementedError
+
+
+class RxRecTransformer(RxTransformer):
+
+    def transform(self, node):
+        fields = []
+        fieldargs = {}
+        
+        for field in node:
+            fieldname, fieldbody = field
+            try:
+                fieldtype, fieldarg = fieldname.astext().split(None, 1)
+            except ValueError:
+                fieldtype, fieldarg = fieldname.astext(), ''
+            if fieldtype == 'field':
+                fields.append((fieldarg, fieldbody))
+            else:
+                assert fieldarg is not None
+                if not fieldarg in fieldargs:
+                    fieldargs[fieldarg] = {}
+                fieldargs[fieldarg][fieldtype] = fieldbody        
+
+    def _transform(self, node):
         typemap = self.typemap
 
         entries = []
@@ -126,7 +138,6 @@ class RxFieldTransformer(object):
                 entries.append([typedesc, entry])
 
         new_list = nodes.field_list()
-        print entries
         for entry in entries:
             if isinstance(entry, nodes.field):
                 new_list += entry
@@ -139,22 +150,22 @@ class RxFieldTransformer(object):
         node.replace_self(new_list)
 
 
+__transformers__ = {
+    '//rec': RxRecTransformer
+}
+
+
 class RxSchemaDirective(Directive):
 
     has_content = True
     required_arguments = 1
     final_argument_whitespace = True
     
-    doc_field_types = [
-        GroupedField('type', label='Type',
-              names=('type', )),
-        GroupedField('field', label='Field',
-                     names=('field', )),
-        Field('contains', label='Contains',
-              names=('contains', )),
-        Field('requires', label='Requires',
-              names=('requires', )),
-    ]
+    option_spec = {
+        'type': lambda x: str(x),
+        'requires': lambda x: directives.choice(x, ('yes', 'no')),
+        'contains': lambda x: str(x),
+    }
 
     def run(self):
         if ':' in self.name:
@@ -177,12 +188,19 @@ class RxSchemaDirective(Directive):
         node.append(signode)
         self.names.append(signature)
 
+        headernode = addnodes.desc_name()
+        headernode += nodes.Text('schema ', 'schema ')
+        headernode += nodes.emphasis(signature, signature)
+        node.append(headernode)
+
         contentnode = addnodes.desc_content()
         node.append(contentnode)
         if self.name:
             self.env.temp_data['object'] = self.names[0]
         self.state.nested_parse(self.content, self.content_offset, contentnode)
-        RxFieldTransformer(self).transform_all(contentnode)
+        type = self.options['type']
+        if type in __transformers__:
+            __transformers__[type](self).transform_all(contentnode)
 
         return [addnodes.index(entries=[]), node]
 
