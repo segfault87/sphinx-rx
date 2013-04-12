@@ -21,7 +21,46 @@ from sphinx.directives import ObjectDescription
 from sphinx.domains import Domain, ObjType, Index
 from sphinx.locale import l_, _
 from sphinx.roles import XRefRole
-from sphinx.util.docfields import DocFieldTransformer, Field, GroupedField
+
+
+# scalar types
+__typedesc__ = {
+    '//str': 'string',
+    '//num': 'number',
+    '//int': 'integer',
+    '//bool': 'boolean',
+    '//one': 'any value but null',
+    '//nil': 'null',
+    '//def': 'any value',
+}
+
+
+def _is_compositional(type):
+    return type == '//arr' or type == '//map'
+
+
+def _is_sequential(type):
+    return type == '//seq'
+
+
+def _describe_type(_type, node, **kwargs):
+    if not isinstance(_type, str) and not isinstance(_type, unicode):
+        _type = _type.astext()
+    if not _type.startswith('/'):
+        node += nodes.inline('', _type)
+    elif _type in __typedesc__:
+        node += nodes.inline('', _(__typedesc__[_type]))
+    elif _is_compositional(_type) and 'contains' in kwargs:
+        if _type == '//arr':
+            node += nodes.inline('', _('array of '))
+        elif  _type == '//map':
+            node += nodes.inline('', _('map of '))
+        _describe_type(kwargs['contains'], node)
+    else:
+        node += nodes.inline('', _type)
+        #return addnodes.pending_xref('', refdomain='rx', refexplicit=False,
+        #                             reftype='schema', reftarget=type)
+                        
 
 
 def _is_single_paragraph(node):
@@ -51,7 +90,7 @@ class RxTransformer(object):
         raise NotImplementedError
 
 
-class RxRecTransformer(RxTransformer):
+class RxNamedFieldTransformer(RxTransformer):
 
     def transform(self, node):
         fields = []
@@ -69,7 +108,35 @@ class RxRecTransformer(RxTransformer):
                 assert fieldarg is not None
                 if not fieldarg in fieldargs:
                     fieldargs[fieldarg] = {}
-                fieldargs[fieldarg][fieldtype] = fieldbody        
+                fieldargs[fieldarg][fieldtype] = fieldbody
+        if len(fields) == 0:
+            return
+
+        new_list = nodes.field_list()
+        field_name = nodes.field_name('', _('Fields'))
+        list = nodes.bullet_list()
+        for name, body in fields:
+            header = []
+            if not name in fieldargs:
+                fieldargs[name] = {}
+            options = fieldargs[name]
+            if 'requires' in options and \
+                    options['requires'].astext().lower() == 'yes':
+                header.append(nodes.strong('', name))
+            else:
+                header.append(nodes.emphasis('', name))
+            if 'type' in options:
+                header.append(nodes.inline('', ' ('))
+                n = nodes.inline()
+                _describe_type(options['type'].astext(), n, **fieldargs[name])
+                header.extend(n)
+                header.append(nodes.inline('', ')'))
+            header.append(nodes.inline('', ' -- '))
+            list += nodes.list_item('', *(header + body.children[0].children))
+        field_body = nodes.field_body('', list)
+        new_list += nodes.field('', field_name, field_body)
+        node.replace_self(new_list)
+        
 
     def _transform(self, node):
         typemap = self.typemap
@@ -147,11 +214,32 @@ class RxRecTransformer(RxTransformer):
                 new_list += fieldtype.make_field(fieldtypes, self.domain,
                                                  content)
 
-        node.replace_self(new_list)
+        #node.replace_self(new_list)
+
+
+class RxFieldListTransformer(RxTransformer):
+
+    list_type = NotImplemented
+
+    def transform(self, node):
+        pass
+
+
+class RxCollectionTransformer(RxFieldListTransformer):
+    
+    list_type = nodes.bullet_list
+
+
+class RxSequentialTransformer(RxFieldListTransformer):
+    
+    list_type = nodes.enumerated_list
 
 
 __transformers__ = {
-    '//rec': RxRecTransformer
+    '//rec': RxNamedFieldTransformer,
+    '//any': RxCollectionTransformer,
+    '//all': RxCollectionTransformer,
+    '//seq': RxSequentialTransformer,
 }
 
 
@@ -181,22 +269,28 @@ class RxSchemaDirective(Directive):
         node['objtype'] = node['desctype'] = self.objtype
         node['noindex'] = False
 
-        self.names = []
-        signature = self.arguments[0]
-        signode = addnodes.desc_signature(signature)
-        signode['first'] = False
-        node.append(signode)
-        self.names.append(signature)
+        try:
+            signature = self.arguments[0]
+            if self.objtype == 'schema':
+                signode = addnodes.desc_signature(signature)
+                signode['first'] = False
+                node += signode
+        except:
+            signature = None
 
         headernode = addnodes.desc_name()
-        headernode += nodes.Text('schema ', 'schema ')
-        headernode += nodes.emphasis(signature, signature)
+        headernode += nodes.inline('', _(self.objtype) + ' ')
+        if signature is not None:
+            headernode += nodes.emphasis('', signature)
+        if _is_compositional(self.options['type']):
+            if signature is not None:
+                headernode += nodes.inline('', ' -- ')
+            _describe_type(self.options['type'], headernode,
+                           contains=self.options['contains'])
         node.append(headernode)
 
         contentnode = addnodes.desc_content()
         node.append(contentnode)
-        if self.name:
-            self.env.temp_data['object'] = self.names[0]
         self.state.nested_parse(self.content, self.content_offset, contentnode)
         type = self.options['type']
         if type in __transformers__:
@@ -204,8 +298,11 @@ class RxSchemaDirective(Directive):
 
         return [addnodes.index(entries=[]), node]
 
+
 class RxFieldDirective(RxSchemaDirective):
-    pass
+    
+    required_arguments = 0
+    optional_arguments = 1
 
 
 class RxXRefRole(XRefRole):
