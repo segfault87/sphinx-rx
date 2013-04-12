@@ -93,9 +93,12 @@ class RxTransformer(object):
 class RxNamedFieldTransformer(RxTransformer):
 
     def transform(self, node):
+        """Transform named field(s) into desired manner."""
+
         fields = []
         fieldargs = {}
         
+        # The input can be in arbitrary order so sort it out
         for field in node:
             fieldname, fieldbody = field
             try:
@@ -135,86 +138,8 @@ class RxNamedFieldTransformer(RxTransformer):
             list += nodes.list_item('', *(header + body.children[0].children))
         field_body = nodes.field_body('', list)
         new_list += nodes.field('', field_name, field_body)
+
         node.replace_self(new_list)
-        
-
-    def _transform(self, node):
-        typemap = self.typemap
-
-        entries = []
-        groupindices = {}
-        types = {}
-
-        for field in node:
-            fieldname, fieldbody = field
-            try:
-                fieldtype, fieldarg = fieldname.astext().split(None, 1)
-            except ValueError:
-                fieldtype, fieldarg = fieldname.astext(), ''
-            typedesc, is_typefield = typemap.get(fieldtype, (None, None))
-
-            if typedesc is None or typedesc.has_arg != bool(fieldarg):
-                new_fieldname = fieldtype.capitalize() + ' ' + fieldarg
-                fieldname[0] = nodes.Text(new_fieldname)
-                entries.append(field)
-                continue
-
-            typename = typedesc.name
-
-            if _is_single_paragraph(fieldbody):
-                content = fieldbody.children[0].children
-            else:
-                content = fieldbody.children
-
-            if is_typefield:
-                content = filter(
-                    lambda n: isinstance(n, nodes.Inline) or
-                              isinstance(n, nodes.Text),
-                    content)
-                if content:
-                    types.setdefault(typename, {})[fieldarg] = content
-                continue
-
-            if typedesc.is_typed:
-                try:
-                    argtype, argname = fieldarg.split(None, 1)
-                except ValueError:
-                    pass
-                else:
-                    types.setdefault(typename, {})[argname] = \
-                                               [nodes.Text(argtype)]
-                    fieldarg = argname
-
-            translatable_content = nodes.inline(fieldbody.rawsource,
-                                                translatable=True)
-            translatable_content.source = fieldbody.parent.source
-            translatable_content.line = fieldbody.parent.line
-            translatable_content += content
-
-            if typedesc.is_grouped:
-                if typename in groupindices:
-                    group = entries[groupindices[typename]]
-                else:
-                    groupindices[typename] = len(entries)
-                    group = [typedesc, []]
-                    entries.append(group)
-                entry = typedesc.make_entry(fieldarg, translatable_content)
-                group[1].append(entry)
-            else:
-                entry = typedesc.make_entry(fieldarg, translatable_content)
-                entries.append([typedesc, entry])
-
-        new_list = nodes.field_list()
-        for entry in entries:
-            if isinstance(entry, nodes.field):
-                new_list += entry
-            else:
-                fieldtype, content = entry
-                fieldtypes = types.get(fieldtype.name, {})
-                new_list += fieldtype.make_field(fieldtypes, self.domain,
-                                                 content)
-
-        #node.replace_self(new_list)
 
 
 class RxFieldListTransformer(RxTransformer):
@@ -222,7 +147,52 @@ class RxFieldListTransformer(RxTransformer):
     list_type = NotImplemented
 
     def transform(self, node):
-        pass
+        """This one should be used with unnamed fields."""
+
+        fields = []
+        fieldargs = {}
+        
+        # Pack into
+        index = -1
+        for field in node:
+            fieldname, fieldbody = field
+            fieldtype = fieldname.astext()
+            if fieldtype == 'field':
+                index += 1
+                fields.append(fieldbody)
+            else:
+                assert index >= 0
+                if not index in fieldargs:
+                    fieldargs[index] = {}
+                fieldargs[index][fieldtype] = fieldbody
+        if len(fields) == 0:
+            return
+
+        new_list = nodes.field_list()
+        field_name = nodes.field_name('', _('Fields'))
+        list = nodes.bullet_list()
+        for index, body in enumerate(fields):
+            footer = []
+            if not index in fieldargs:
+                fieldargs[index] = {}
+            options = fieldargs[index]
+            if 'type' in options:
+                footer.append(nodes.inline('', ' ('))
+                n = nodes.inline()
+                _describe_type(options['type'].astext(), n, **fieldargs[index])
+                footer.extend(n)
+                footer.append(nodes.inline('', ')'))
+            if 'requires' in options and \
+                    options['requires'].astext().lower() == 'yes':
+                content = nodes.strong()
+            else:
+                content = nodes.inline()
+            content += body.children[0].children
+            list += nodes.list_item('', content, *footer)
+        field_body = nodes.field_body('', list)
+        new_list += nodes.field('', field_name, field_body)
+
+        node.replace_self(new_list)
 
 
 class RxCollectionTransformer(RxFieldListTransformer):
@@ -306,6 +276,7 @@ class RxFieldDirective(RxSchemaDirective):
 
 
 class RxXRefRole(XRefRole):
+
     def process_link(self, env, refnode, has_explicit_title,
                      title, target):
         print title, target
@@ -313,6 +284,7 @@ class RxXRefRole(XRefRole):
 
 
 class RxDomain(Domain):
+
     """RX domain."""
 
     name = 'rx'
